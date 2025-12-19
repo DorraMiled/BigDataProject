@@ -1,0 +1,14 @@
+# Configuration des pipelines Logstash
+# Définit les différents pipelines à exécuter
+
+- pipeline.id: csv-transactions
+  path.config: "/usr/share/logstash/pipelines/csv-transactions.conf"
+  pipeline.workers: 2
+  pipeline.batch.size: 125
+  queue.type: memory
+
+- pipeline.id: json-logs
+  path.config: "/usr/share/logstash/pipelines/json-logs.conf"
+  pipeline.workers: 2
+  pipeline.batch.size: 125
+  queue.type: memory

@@ -30,11 +30,27 @@ services:
       - "5000:5000"
       - "9600:9600"
     volumes:
-      - ./elk-config/logstash/logstash-files.conf:/usr/share/logstash/pipeline/logstash.conf
-      - ./elk-config/logstash/logstash.yml:/usr/share/logstash/config/logstash.yml
-      - ../ecommerce_logs:/usr/share/logstash/data
+      # Configuration des pipelines
+      - ./logstash/config/pipelines.yml:/usr/share/logstash/config/pipelines.yml
+      # Pipelines
+      - ./logstash/pipelines:/usr/share/logstash/pipelines
+      # Patterns Grok personnalisés
+      - ./logstash/patterns:/usr/share/logstash/patterns
+      # Données d'entrée (CSV et JSON)
+      - ./logstash/data:/usr/share/logstash/input_data
+      # Volumes pour logs
+      - logstash-logs:/usr/share/logstash/logs
     environment:
-      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
+      - "LS_JAVA_OPTS=-Xms512m -Xmx512m"
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+      - xpack.monitoring.enabled=false
+      - pipeline.workers=2
+      - pipeline.batch.size=125
+      - pipeline.batch.delay=50
+      - config.reload.automatic=true
+      - config.reload.interval=3s
+      - log.level=info
+      - http.host=0.0.0.0
     networks:
       - ecommerce-network
     depends_on:
@@ -121,4 +137,6 @@ volumes:
   mongodb-data:
     driver: local
   redis-data:
+    driver: local
+  logstash-logs:
     driver: local

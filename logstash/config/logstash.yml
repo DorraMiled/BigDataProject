@@ -1,0 +1,36 @@
+# Configuration principale Logstash
+
+# Paramètres du noeud
+node.name: logstash-ecommerce
+
+# Répertoires de données
+path.data: /usr/share/logstash/data
+path.logs: /usr/share/logstash/logs
+
+# Configuration des pipelines
+pipeline.workers: 2
+pipeline.batch.size: 125
+pipeline.batch.delay: 50
+
+# Monitoring
+monitoring.enabled: false
+
+# Configuration API
+http.host: "0.0.0.0"
+http.port: 9600
+
+# Configuration des logs
+log.level: info
+log.format: json
+
+# Configuration du rechargement automatique
+config.reload.automatic: true
+config.reload.interval: 3s
+
+# Configuration de la file d'attente
+queue.type: memory
+queue.max_bytes: 1gb
+
+# Configuration de la dead letter queue
+dead_letter_queue.enable: true
+dead_letter_queue.max_bytes: 1gb

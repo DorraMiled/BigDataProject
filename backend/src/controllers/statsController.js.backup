@@ -1,0 +1,392 @@
+const elasticsearchService = require('../services/elasticsearchService');
+const redisClient = require('../config/redis');
+const logger = require('../utils/logger');
+
+// Constantes
+const CACHE_TTL = 60; // 60 secondes
+const CACHE_KEY_DASHBOARD = 'stats:dashboard';
+const CACHE_KEY_DETAILED = 'stats:detailed';
+
+/**
+ * Récupère les statistiques pour le dashboard
+ */
+const getDashboardStats = async (req, res, next) => {
+  try {
+    // Vérifier le cache Redis
+    const cached = await redisClient.get(CACHE_KEY_DASHBOARD);
+      
+      if (cached) {
+        logger.debug('Stats dashboard récupérées du cache');
+        return res.json({
+          success: true,
+          data: JSON.parse(cached),
+          cached: true
+        });
+      }
+
+      // Dates pour aujourd'hui
+      const now = new Date();
+      const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+      // Date pour les dernières 24h
+      const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+      // Requête Elasticsearch pour toutes les stats en parallèle
+      const [
+        totalStats,
+        todayStats,
+        errorStats,
+        hourlyStats,
+        typeDistribution
+      ] = await Promise.all([
+        this.getTotalLogs(),
+        this.getLogsToday(startOfToday, endOfToday),
+        this.getErrorsToday(startOfToday, endOfToday),
+        this.getLogsByHour(last24h, now),
+        this.getLogTypeDistribution()
+      ]);
+
+      const statsData = {
+        summary: {
+          totalLogs: totalStats.total,
+          logsToday: todayStats.total,
+          errorsToday: errorStats.total,
+          errorRate: todayStats.total > 0 ? ((errorStats.total / todayStats.total) * 100).toFixed(2) : 0
+        },
+        charts: {
+          hourly: hourlyStats,
+          typeDistribution: typeDistribution
+        }
+      };
+
+      // Sauvegarder dans le cache Redis
+      await redisClient.setex(
+        this.CACHE_KEY_DASHBOARD,
+        this.CACHE_TTL,
+        JSON.stringify(statsData)
+      );
+      logger.debug(`Stats dashboard mises en cache pour ${this.CACHE_TTL}s`);
+
+      res.json({
+        success: true,
+        data: statsData,
+        cached: false
+      });
+    } catch (error) {
+      logger.error(`Erreur getDashboardStats: ${error.message}`);
+      next(error);
+    }
+  }
+
+  async getTotalLogs() {
+    try {
+      const result = await elasticsearchService.client.count({
+        index: elasticsearchService.indices
+      });
+
+      return {
+        total: result.count
+      };
+    } catch (error) {
+      logger.error(`Erreur getTotalLogs: ${error.message}`);
+      return { total: 0 };
+    }
+  }
+
+  async getLogsToday(startDate, endDate) {
+    try {
+      const result = await elasticsearchService.client.count({
+        index: elasticsearchService.indices,
+        body: {
+          query: {
+            range: {
+              timestamp: {
+                gte: startDate.toISOString(),
+                lte: endDate.toISOString()
+              }
+            }
+          }
+        }
+      });
+
+      return {
+        total: result.count
+      };
+    } catch (error) {
+      logger.error(`Erreur getLogsToday: ${error.message}`);
+      return { total: 0 };
+    }
+  }
+
+  async getErrorsToday(startDate, endDate) {
+    try {
+      const result = await elasticsearchService.client.count({
+        index: elasticsearchService.indices,
+        body: {
+          query: {
+            bool: {
+              must: [
+                {
+                  range: {
+                    timestamp: {
+                      gte: startDate.toISOString(),
+                      lte: endDate.toISOString()
+                    }
+                  }
+                }
+              ],
+              should: [
+                { term: { 'status.keyword': 'error' } },
+                { term: { 'status.keyword': 'failed' } },
+                { term: { '_index': 'ecommerce_errors' } }
+              ],
+              minimum_should_match: 1
+            }
+          }
+        }
+      });
+
+      return {
+        total: result.count
+      };
+    } catch (error) {
+      logger.error(`Erreur getErrorsToday: ${error.message}`);
+      return { total: 0 };
+    }
+  }
+
+  async getLogsByHour(startDate, endDate) {
+    try {
+      const result = await elasticsearchService.client.search({
+        index: elasticsearchService.indices,
+        body: {
+          size: 0,
+          query: {
+            range: {
+              timestamp: {
+                gte: startDate.toISOString(),
+                lte: endDate.toISOString()
+              }
+            }
+          },
+          aggs: {
+            logs_per_hour: {
+              date_histogram: {
+                field: 'timestamp',
+                calendar_interval: '1h',
+                format: 'yyyy-MM-dd HH:mm',
+                min_doc_count: 0,
+                extended_bounds: {
+                  min: startDate.toISOString(),
+                  max: endDate.toISOString()
+                }
+              }
+            }
+          }
+        }
+      });
+
+      const buckets = result.aggregations.logs_per_hour.buckets;
+
+      // Format pour Chart.js
+      return {
+        labels: buckets.map(b => b.key_as_string),
+        datasets: [
+          {
+            label: 'Logs par heure',
+            data: buckets.map(b => b.doc_count),
+            backgroundColor: 'rgba(54, 162, 235, 0.5)',
+            borderColor: 'rgba(54, 162, 235, 1)',
+            borderWidth: 2,
+            fill: true
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error(`Erreur getLogsByHour: ${error.message}`);
+      return {
+        labels: [],
+        datasets: [{
+          label: 'Logs par heure',
+          data: [],
+          backgroundColor: 'rgba(54, 162, 235, 0.5)',
+          borderColor: 'rgba(54, 162, 235, 1)',
+          borderWidth: 2
+        }]
+      };
+    }
+  }
+
+  async getLogTypeDistribution() {
+    try {
+      const result = await elasticsearchService.client.search({
+        index: elasticsearchService.indices,
+        body: {
+          size: 0,
+          aggs: {
+            by_index: {
+              terms: {
+                field: '_index',
+                size: 10
+              }
+            }
+          }
+        }
+      });
+
+      const buckets = result.aggregations.by_index.buckets;
+
+      // Mapping des noms d'index vers des labels lisibles
+      const labelMap = {
+        'ecommerce_transactions': 'Transactions',
+        'ecommerce_errors': 'Erreurs',
+        'ecommerce_fraud_detection': 'Détection Fraude',
+        'ecommerce_performance': 'Performance',
+        'ecommerce_user_behavior': 'Comportement Utilisateur'
+      };
+
+      // Couleurs pour Chart.js
+      const colors = [
+        'rgba(255, 99, 132, 0.7)',   // Rouge
+        'rgba(54, 162, 235, 0.7)',   // Bleu
+        'rgba(255, 206, 86, 0.7)',   // Jaune
+        'rgba(75, 192, 192, 0.7)',   // Vert
+        'rgba(153, 102, 255, 0.7)'   // Violet
+      ];
+
+      // Format pour Chart.js (Pie/Doughnut)
+      return {
+        labels: buckets.map(b => labelMap[b.key] || b.key),
+        datasets: [
+          {
+            label: 'Répartition par type',
+            data: buckets.map(b => b.doc_count),
+            backgroundColor: colors.slice(0, buckets.length),
+            borderColor: colors.slice(0, buckets.length).map(c => c.replace('0.7', '1')),
+            borderWidth: 2
+          }
+        ]
+      };
+    } catch (error) {
+      logger.error(`Erreur getLogTypeDistribution: ${error.message}`);
+      return {
+        labels: [],
+        datasets: [{
+          label: 'Répartition par type',
+          data: [],
+          backgroundColor: [],
+          borderColor: [],
+          borderWidth: 2
+        }]
+      };
+    }
+  }
+
+  async getDetailedStats(req, res, next) {
+    try {
+      const { dateFrom, dateTo } = req.query;
+
+      const startDate = dateFrom ? new Date(dateFrom) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const endDate = dateTo ? new Date(dateTo) : new Date();
+
+      // Créer une clé de cache unique basée sur les paramètres
+      const cacheKey = `${this.CACHE_KEY_DETAILED}:${startDate.getTime()}:${endDate.getTime()}`;
+
+      // Vérifier le cache Redis
+      const cached = await redisClient.get(cacheKey);
+      
+      if (cached) {
+        logger.debug('Stats détaillées récupérées du cache');
+        return res.json({
+          success: true,
+          data: JSON.parse(cached),
+          cached: true
+        });
+      }
+
+      const result = await elasticsearchService.client.search({
+        index: elasticsearchService.indices,
+        body: {
+          size: 0,
+          query: {
+            range: {
+              timestamp: {
+                gte: startDate.toISOString(),
+                lte: endDate.toISOString()
+              }
+            }
+          },
+          aggs: {
+            total_count: {
+              value_count: { field: '_id' }
+            },
+            by_status: {
+              terms: { field: 'status.keyword', size: 20 }
+            },
+            by_index: {
+              terms: { field: '_index', size: 10 }
+            },
+            transactions_stats: {
+              filter: { term: { '_index': 'ecommerce_transactions' } },
+              aggs: {
+                total_amount: { sum: { field: 'amount' } },
+                avg_amount: { avg: { field: 'amount' } },
+                count: { value_count: { field: 'transaction_id.keyword' } }
+              }
+            },
+            top_users: {
+              terms: {
+                field: 'user_id.keyword',
+                size: 10,
+                order: { _count: 'desc' }
+              }
+            },
+            daily_trend: {
+              date_histogram: {
+                field: 'timestamp',
+                calendar_interval: '1d',
+                format: 'yyyy-MM-dd'
+              }
+            }
+          }
+        }
+      });
+
+      const statsData = {
+        total: result.aggregations.total_count.value,
+        byStatus: result.aggregations.by_status.buckets,
+        byIndex: result.aggregations.by_index.buckets,
+        transactions: {
+          total: result.aggregations.transactions_stats.total_amount.value || 0,
+          average: result.aggregations.transactions_stats.avg_amount.value || 0,
+          count: result.aggregations.transactions_stats.count.value || 0
+        },
+        topUsers: result.aggregations.top_users.buckets,
+        dailyTrend: {
+          labels: result.aggregations.daily_trend.buckets.map(b => b.key_as_string),
+          data: result.aggregations.daily_trend.buckets.map(b => b.doc_count)
+        }
+      };
+
+      // Sauvegarder dans le cache Redis
+      await redisClient.setex(
+        cacheKey,
+        this.CACHE_TTL,
+        JSON.stringify(statsData)
+      );
+      logger.debug(`Stats détaillées mises en cache pour ${this.CACHE_TTL}s`);
+
+      res.json({
+        success: true,
+        data: statsData,
+        cached: false
+      });
+    } catch (error) {
+      logger.error(`Erreur getDetailedStats: ${error.message}`);
+      next(error);
+    }
+  }
+}
+
+module.exports = new StatsController();
